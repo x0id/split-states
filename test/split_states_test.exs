@@ -14,14 +14,14 @@ defmodule SplitStatesTest do
   end
 
   defmodule Job do
-    def init(:ping), do: :pong
-    def init(:idle), do: :idle
-    def init(:stop), do: :stop
-    def init(:real), do: {:set, :test_state}
+    def init(_, :ping), do: :pong
+    def init(_, :idle), do: :idle
+    def init(_, :stop), do: :stop
+    def init(_, :real), do: {:set, :test_state}
 
-    def init(:read), do: {:return, :value}
+    def init(_, :read), do: {:return, :value}
 
-    def init(:store, value), do: {:set, [value: value]}
+    def init(_, :store, value), do: {:set, [value: value]}
     def handle([value: value], :read), do: {:return, value}
     def handle([value: value], :pop), do: [{:return, value}, :stop]
   end
@@ -89,41 +89,49 @@ defmodule SplitStatesTest do
   test "call another state" do
     defmodule A do
       # return with no state creation
-      def init(:first), do: {:return, :first}
+      def init(_, :first), do: {:return, :first}
 
       # create state, return result, delete state
-      def init(:second), do: [{:set, :a_state}, {:return, :second}, :stop]
+      def init(_, :second), do: [{:set, :a_state}, :return, :stop]
     end
 
     defmodule B do
-      def init(target, variant) do
+      def init(_, target, variant) do
         [{:set, :b_state}, {:call, target, [variant], :result}]
       end
 
       def handle(:b_state, :result, value) do
         [{:return, value}, :stop]
       end
+
+      def handle(:b_state, :result) do
+        [:return, :stop]
+      end
     end
 
     states = Container.new()
-    caller = {:callback, &Process.put(:result, &1)}
+    caller1 = {:callback, &Process.put(:result, &1)}
+    caller2 = {:callback, fn -> Process.put(:result, :void) end}
+    caller3 = {:callback, fn -> Process.put(:result) end}
 
-    assert ^states = SplitStates.init(states, {B, :one}, [{A, :two}, :first], caller)
+    assert ^states = SplitStates.init(states, {B, :one}, [{A, :two}, :first], caller1)
     assert :first = Process.get(:result)
 
-    assert ^states = SplitStates.init(states, {B, :one}, [{A, :two}, :second], caller)
-    assert :second = Process.get(:result)
+    assert ^states = SplitStates.init(states, {B, :one}, [{A, :two}, :second], caller2)
+    assert :void = Process.get(:result)
+
+    assert ^states = SplitStates.init(states, {B, :one}, [{A, :two}, :second], caller3)
   end
 
   test "state update, multiple subscribers" do
     defmodule Server do
-      def init(), do: {:set, %{}}
+      def init(_), do: {:set, %{}}
       def handle(state, :upd, val), do: [{:return, :ok}, {:set, Map.put(state, :value, val)}]
       def handle(state, :run), do: [{:return, state[:value]}, :stop]
     end
 
     defmodule Client do
-      def init(target), do: [{:set, []}, {:call, target, [], :ret}]
+      def init(_, target), do: [{:set, []}, {:call, target, [], :ret}]
       def handle(_, :ret, :result), do: :stop
       def handle(_, :ret, _), do: :idle
     end
@@ -133,5 +141,75 @@ defmodule SplitStatesTest do
     states_ = Enum.reduce(1..20, states, &SplitStates.init(&2, {Client, &1}, [{Server, :x}]))
     states2 = SplitStates.handle(states_, {Server, :x}, [:upd, :result])
     assert ^states = SplitStates.handle(states2, {Server, :x}, [:run])
+  end
+
+  test "test simple timer implementation" do
+    defmodule Timer do
+      def init(target, ms, val) do
+        tag = make_ref()
+        tref = Process.send_after(self(), {:timeout, tag, target}, ms)
+        {:set, {tref, tag, val}}
+      end
+
+      # input for timer "fire" event
+      def handle({_tref, tag, val}, tag, :fire) do
+        # return result to subscriber(s)
+        [{:return, val}, :stop]
+      end
+
+      # "stop" command will cancel timer
+      def handle({tref, tag, _val}, :stop) do
+        Process.cancel_timer(tref)
+
+        # flash timer event if any
+        receive do
+          {:timeout, ^tag, _} ->
+            :ok
+        after
+          0 ->
+            :ok
+        end
+
+        :stop
+      end
+    end
+
+    # start 100ms timer
+    states = Container.new()
+    caller = {:callback, &Process.put(:result, &1)}
+    states1 = SplitStates.init(states, {Timer, :one}, [100, :a], caller)
+    states2 = SplitStates.init(states1, {Timer, :two}, [200, :b], caller)
+
+    # timers were not fired yet
+    assert nil == Process.get(:result)
+
+    # handle 1st timer event
+    states3 =
+      receive do
+        {:timeout, tag, target} ->
+          SplitStates.handle(states2, target, [tag, :fire])
+      end
+
+    # first timer is fired
+    assert :a = Process.get(:result)
+
+    # cancel second timer
+    states4 = SplitStates.handle(states3, {Timer, :two}, [:stop])
+
+    # handle 2st timer event
+    states5 =
+      receive do
+        {:timeout, tag, target} ->
+          SplitStates.handle(states4, target, [tag, :fire])
+      after
+        300 ->
+          states4
+      end
+
+    # second timer was canceled, so result is set by the 1st one
+    assert :a = Process.get(:result)
+
+    # all states are done
+    assert ^states = states5
   end
 end

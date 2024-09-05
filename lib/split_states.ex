@@ -66,20 +66,46 @@ defmodule SplitStates do
     end
   end
 
-  defp return({:callback, fun}, result, tt) when is_function(fun, 1) do
+  defp return({:callback, fun}, result, tt) when is_function(fun) do
     trace(tt, :ret_func, result)
-    fun.(result)
+
+    try do
+      apply(fun, result)
+    rescue
+      error ->
+        Logger.error("can't call callback: #{inspect(error)}")
+        :stop
+    end
+
     :idle
   end
 
   defp return({:tagged, origin, tag}, result, tt) do
-    trace(tt, :tagged, {tag, result})
-    {:handle, {origin, [tag, result]}}
+    trace(tt, :tagged, [tag | result])
+    {:handle, {origin, [tag | result]}}
   end
 
   defp return(caller, _result, _tt) do
     Logger.error("malformed caller: #{inspect(caller)}")
     :idle
+  end
+
+  defp apply_return(result, items, [{_, _, callers, _} | _] = stack, states) do
+    items =
+      callers
+      |> Enum.reduce(items, fn {caller, tt}, acc ->
+        case return(caller, result, tt) do
+          :idle ->
+            # return processed
+            acc
+
+          {:handle, _} = item ->
+            # push back "call" item
+            [item | acc]
+        end
+      end)
+
+    {items, stack, states}
   end
 
   defp apply_result([], _item, items, stack, states), do: {items, stack, states}
@@ -101,29 +127,14 @@ defmodule SplitStates do
     {[item | items], stack, states}
   end
 
+  # return void to caller(s)
+  defp apply_result(:return, _item, items, stack, states) do
+    apply_return([], items, stack, states)
+  end
+
   # return result to caller(s)
-  defp apply_result(
-         {:return, result},
-         _item,
-         items,
-         [{_target, _tts, callers, _state} | _tail] = stack,
-         states
-       ) do
-    items =
-      callers
-      |> Enum.reduce(items, fn {caller, tt}, acc ->
-        case return(caller, result, tt) do
-          :idle ->
-            # return processed
-            acc
-
-          {:handle, _} = item ->
-            # push back "call" item
-            [item | acc]
-        end
-      end)
-
-    {items, stack, states}
+  defp apply_result({:return, result}, _item, items, stack, states) do
+    apply_return([result], items, stack, states)
   end
 
   # save state and subscription
@@ -167,9 +178,9 @@ defmodule SplitStates do
   end
 
   # create new state
-  defp construct({mod, _key}, args) do
+  defp construct({mod, _key} = target, args) do
     try do
-      apply(mod, :init, args)
+      apply(mod, :init, [target | args])
     rescue
       error ->
         Logger.error("can't init state: #{inspect(error)}")
