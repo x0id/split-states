@@ -21,6 +21,7 @@ defmodule SplitStates.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      {:typedstruct, "~> 0.5"},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]
   end

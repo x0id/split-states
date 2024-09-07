@@ -1,7 +1,7 @@
 defmodule SplitStates do
   require Logger
-  require SplitStates.Container
   alias SplitStates.Container, as: Container
+  alias SplitStates.Throttle, as: Throttle
 
   def init(states, target, event, caller \\ nil, tt \\ nil) do
     [{:init, {target, event, caller, tt}}] |> loop([], states)
@@ -11,24 +11,46 @@ defmodule SplitStates do
     [{:handle, {target, event}}] |> loop([], states)
   end
 
+  def flush_throttle_queue(states, kind, timer) do
+    case Container.fetch(states, kind) do
+      {:ok, {_, _, state}} ->
+        case Throttle.flush(state) do
+          {items, state} ->
+            states |> Container.put(kind, state) |> place_items(items)
+
+          {until, items, state} ->
+            states |> Container.put(kind, state) |> set_timer(timer, until) |> place_items(items)
+        end
+
+      :error ->
+        states
+    end
+  end
+
   defp loop({items, stack, states}), do: loop(items, stack, states)
 
   defp loop([], _, states), do: states
 
-  defp loop([{:init, {target, event, caller, tt} = input} = item | items], stack, states) do
+  defp loop([{:init, {target, event, caller, _choke, tt} = input} = item | items], stack, states) do
     trace(tt, :init, input)
 
     case Container.exists?(states, target) do
       false ->
-        trace(tt, :new, {target, event})
+        case throttle(states, input) do
+          {true, states} ->
+            trace(tt, :new, {target, event})
 
-        tts = Container.add_tt(tt)
-        callers = Container.add_caller(caller, tt)
-        stack = [{target, tts, callers, nil} | stack]
+            tts = Container.add_tt(tt)
+            callers = Container.add_caller(caller, tt)
+            stack = [{target, tts, callers, nil} | stack]
 
-        construct(target, event)
-        |> tap(&trace(tt, :result, &1))
-        |> apply_result(item, items, stack, states)
+            construct(target, event)
+            |> tap(&trace(tt, :result, &1))
+            |> apply_result(item, items, stack, states)
+
+          {false, states} ->
+            {items, stack, states}
+        end
 
       true ->
         trace(tt, :result, :subscribe)
@@ -64,6 +86,36 @@ defmodule SplitStates do
         Logger.error("target #{inspect(target)} not found")
         loop(items, stack, states)
     end
+  end
+
+  # throttle input
+  defp throttle(states, {_target, _event, _caller, {kind, _, _, timer}, _tt} = input) do
+    case Container.fetch(states, kind) do
+      {:ok, {_, _, state}} ->
+        case Throttle.proc(state, input) do
+          {result, state} ->
+            {result, states |> Container.put(kind, state)}
+
+          {false, until, state} ->
+            {false, states |> Container.put(kind, state) |> set_timer(timer, until)}
+        end
+
+      :error ->
+        state = Throttle.start(input)
+        {true, states |> Container.put(kind, state)}
+    end
+  end
+
+  defp throttle(states, {_target, _event, _caller, nil = _choke, _tt}) do
+    {true, states}
+  end
+
+  defp set_timer(states, _timer, _abstime) do
+    states
+  end
+
+  defp place_items(states, _items) do
+    states
   end
 
   defp return({:callback, fun}, result, tt) when is_function(fun) do
