@@ -42,7 +42,7 @@ defmodule SplitStates.Throttle do
           {true, %State{state | next_ts: next}}
 
         true ->
-          until = next - stop
+          until = next - window
           update_qlen(:inc, kind)
           {false, until, %State{state | queue: :queue.in(input, queue)}}
       end
@@ -54,10 +54,10 @@ defmodule SplitStates.Throttle do
   end
 
   # process timer event
-  def flush(%State{queue: queue, step: step, kind: kind} = state) do
+  def flush(%State{queue: queue, step: step, window: window, kind: kind} = state) do
     now = System.monotonic_time()
     next = state.next_ts
-    stop = now + state.window
+    stop = now + window
     {next, queue, acc} = pop_send(kind, next, step, stop, queue, [])
 
     next = if next < now, do: now + step, else: next
@@ -66,7 +66,7 @@ defmodule SplitStates.Throttle do
     if :queue.is_empty(queue) do
       {acc, state}
     else
-      until = next + step - stop
+      until = next + step - window
       {until, acc, state}
     end
   end

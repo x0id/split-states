@@ -56,7 +56,7 @@ defmodule SplitStatesTest do
 
     # create a state with trace token
     expected = %{{Job, :one} => {[:trace_token], [{:test_caller, :trace_token}], :test_state}}
-    assert ^expected = SplitStates.init(states, {Job, :one}, [:real], caller, :trace_token)
+    assert ^expected = SplitStates.init(states, {Job, :one}, [:real], caller, nil, :trace_token)
   end
 
   test "return result" do
@@ -64,9 +64,9 @@ defmodule SplitStatesTest do
     caller = {:callback, &Logger.info("ret: #{inspect(&1)}")}
 
     # direct return, no state added
-    assert ^states = SplitStates.init(states, {Job, :one}, [:read], caller, :trace_token)
+    assert ^states = SplitStates.init(states, {Job, :one}, [:read], caller, nil, :trace_token)
     # malformed caller
-    assert ^states = SplitStates.init(states, {Job, :one}, [:read], :caller, :trace_token)
+    assert ^states = SplitStates.init(states, {Job, :one}, [:read], :caller, nil, :trace_token)
   end
 
   test "save and return result" do
@@ -75,7 +75,7 @@ defmodule SplitStatesTest do
 
     # delayed return, result stored in the state
     value = [{:abc, 123}, %{a: :b}]
-    states_ = SplitStates.init(states, {Job, :one}, [:store, value], caller, dbg_tt())
+    states_ = SplitStates.init(states, {Job, :one}, [:store, value], caller, nil, dbg_tt())
     assert ^states_ = SplitStates.handle(states_, {Job, :one}, [:read])
     assert ^value = Process.get(:result)
     assert ^states = SplitStates.handle(states_, {Job, :one}, [:pop])
@@ -211,5 +211,57 @@ defmodule SplitStatesTest do
 
     # all states are done
     assert ^states = states5
+  end
+
+  test "test basic throttle" do
+    defmodule Doer do
+      def init({_, x}) do
+        Process.put(:result, x)
+        :idle
+      end
+    end
+
+    defmodule ChokeTimer do
+      def init({_, abstime} = me) do
+        x = 1 |> System.convert_time_unit(:millisecond, :native)
+
+        ms =
+          case abstime - System.monotonic_time() do
+            diff when diff > 0 ->
+              (diff / x) |> ceil
+
+            _ ->
+              0
+          end
+
+        Process.send_after(self(), {:timeout, me}, ms)
+        {:set, []}
+      end
+
+      def handle(_, :go) do
+        {:flush_throttle, :test_choke, __MODULE__}
+      end
+    end
+
+    states = Container.new()
+    caller = {:callback, &Process.put(:result, &1)}
+    choke = {:test_choke, 10, 100, ChokeTimer}
+    states_ = 1..50 |> Enum.reduce(states, &SplitStates.init(&2, {Doer, &1}, [], caller, choke))
+    assert 10 == Process.get(:result)
+
+    defmodule Util do
+      def loop(states, max) do
+        receive do
+          {:timeout, choke_timer} ->
+            ret = SplitStates.handle(states, choke_timer, [:go])
+            Process.get(:result) < max && ret |> loop(max)
+        after
+          1000 -> {:error, :timeout}
+        end
+      end
+    end
+
+    Util.loop(states_, 50)
+    assert 50 == Process.get(:result)
   end
 end

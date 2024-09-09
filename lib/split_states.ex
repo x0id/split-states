@@ -3,28 +3,12 @@ defmodule SplitStates do
   alias SplitStates.Container, as: Container
   alias SplitStates.Throttle, as: Throttle
 
-  def init(states, target, event, caller \\ nil, tt \\ nil) do
-    [{:init, {target, event, caller, tt}}] |> loop([], states)
+  def init(states, target, event, caller \\ nil, choke \\ nil, tt \\ nil) do
+    [{:init, {target, event, caller, choke, tt}}] |> loop([], states)
   end
 
   def handle(states, target, event) do
     [{:handle, {target, event}}] |> loop([], states)
-  end
-
-  def flush_throttle_queue(states, kind, timer) do
-    case Container.fetch(states, kind) do
-      {:ok, {_, _, state}} ->
-        case Throttle.flush(state) do
-          {items, state} ->
-            states |> Container.put(kind, state) |> place_items(items)
-
-          {until, items, state} ->
-            states |> Container.put(kind, state) |> set_timer(timer, until) |> place_items(items)
-        end
-
-      :error ->
-        states
-    end
   end
 
   defp loop({items, stack, states}), do: loop(items, stack, states)
@@ -50,6 +34,9 @@ defmodule SplitStates do
 
           {false, states} ->
             {items, stack, states}
+
+          {false, timer, until, states} ->
+            {items, stack, states} |> set_throttle_timer(timer, until)
         end
 
       true ->
@@ -69,6 +56,11 @@ defmodule SplitStates do
     process(target, event, state)
     |> tap(&trace(tts, :result, &1))
     |> apply_result(item, items, stack, states)
+    |> loop()
+  end
+
+  defp loop([{:flush_throttle, kind, timer} | items], stack, states) do
+    flush_throttle_queue(kind, timer, items, stack, states)
     |> loop()
   end
 
@@ -97,7 +89,7 @@ defmodule SplitStates do
             {result, states |> Container.put(kind, state)}
 
           {false, until, state} ->
-            {false, states |> Container.put(kind, state) |> set_timer(timer, until)}
+            {false, timer, until, states |> Container.put(kind, state)}
         end
 
       :error ->
@@ -110,12 +102,38 @@ defmodule SplitStates do
     {true, states}
   end
 
-  defp set_timer(states, _timer, _abstime) do
-    states
+  defp flush_throttle_queue(kind, timer, items, stack, states) do
+    case Container.fetch(states, kind) do
+      {:ok, {_, _, state}} ->
+        case Throttle.flush(state) do
+          {inputs, state} ->
+            states = states |> Container.put(kind, state)
+            items = inputs |> place_items(items)
+            {items, stack, states}
+
+          {until, inputs, state} ->
+            states = states |> Container.put(kind, state)
+            items = inputs |> place_items(items)
+            {items, stack, states} |> set_throttle_timer(timer, until)
+        end
+
+      :error ->
+        {items, stack, states}
+    end
   end
 
-  defp place_items(states, _items) do
-    states
+  defp set_throttle_timer({items, stack, states}, timer_module, abstime) do
+    target = {timer_module, abstime}
+    item = {:init, {target, [], nil, nil, nil}}
+    {[item | items], stack, states}
+  end
+
+  defp place_items(inputs, items) do
+    inputs
+    |> Enum.reduce(items, fn
+      {target, event, caller, _choke, tt}, acc ->
+        [{:init, {target, event, caller, nil, tt}} | acc]
+    end)
   end
 
   defp return({:callback, fun}, result, tt) when is_function(fun) do
@@ -175,7 +193,7 @@ defmodule SplitStates do
          states
        ) do
     caller = {:tagged, origin, tag}
-    item = {:init, {target, event, caller, tts}}
+    item = {:init, {target, event, caller, nil, tts}}
     {[item | items], stack, states}
   end
 
@@ -187,6 +205,11 @@ defmodule SplitStates do
   # return result to caller(s)
   defp apply_result({:return, result}, _item, items, stack, states) do
     apply_return([result], items, stack, states)
+  end
+
+  # timer module signals to flush throttle queue
+  defp apply_result({:flush_throttle, kind, timer}, _item, items, stack, states) do
+    {[{:flush_throttle, kind, timer} | items], stack, states}
   end
 
   # save state and subscription
