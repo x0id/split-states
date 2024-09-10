@@ -11,6 +11,18 @@ defmodule SplitStatesTest do
       # &Logger.debug("count(#{&1}, #{inspect(&2)})")
       fn _, _ -> false = :persistent_term.erase(:spit_states_counter) end
     )
+
+    :persistent_term.put(
+      :spit_states_throttle_io,
+      # &Logger.debug("count(#{&1}, #{inspect(&2)})")
+      fn _, _ -> false = :persistent_term.erase(:spit_states_throttle_io) end
+    )
+
+    :persistent_term.put(
+      :spit_states_throttle_qlen,
+      # &Logger.debug("count(#{&1}, #{inspect(&2)})")
+      fn _, _ -> false = :persistent_term.erase(:spit_states_throttle_qlen) end
+    )
   end
 
   defmodule Job do
@@ -154,7 +166,7 @@ defmodule SplitStatesTest do
       # input for timer "fire" event
       def handle({_tref, tag, val}, tag, :fire) do
         # return result to subscriber(s)
-        [{:return, val}, :stop]
+        {:stop, val}
       end
 
       # "stop" command will cancel timer
@@ -213,55 +225,80 @@ defmodule SplitStatesTest do
     assert ^states = states5
   end
 
+  defmodule Wait do
+    def loop(states, max) do
+      receive do
+        {:timeout, timer} ->
+          ret = SplitStates.handle(states, timer, [:fire])
+          Process.get(:result) < max && ret |> loop(max)
+      after
+        1000 -> {:error, :timeout}
+      end
+    end
+  end
+
+  defmodule ChokeTimer do
+    def init({_, until} = me) do
+      Process.send_after(self(), {:timeout, me}, abs_to_ms(until))
+      {:set, []}
+    end
+
+    def handle(_, :fire), do: :return
+
+    @units 1 |> System.convert_time_unit(:millisecond, :native)
+    defp abs_to_ms(abstime) do
+      case abstime - System.monotonic_time() do
+        diff when diff > 0 ->
+          (diff / @units) |> ceil
+
+        _ ->
+          0
+      end
+    end
+  end
+
+  defmodule Doer do
+    def init({_, x}), do: {:return, x}
+  end
+
   test "test basic throttle" do
-    defmodule Doer do
-      def init({_, x}) do
-        Process.put(:result, x)
-        :idle
-      end
-    end
-
-    defmodule ChokeTimer do
-      def init({_, abstime} = me) do
-        x = 1 |> System.convert_time_unit(:millisecond, :native)
-
-        ms =
-          case abstime - System.monotonic_time() do
-            diff when diff > 0 ->
-              (diff / x) |> ceil
-
-            _ ->
-              0
-          end
-
-        Process.send_after(self(), {:timeout, me}, ms)
-        {:set, []}
-      end
-
-      def handle(_, :go) do
-        {:flush_throttle, :test_choke, __MODULE__}
-      end
-    end
-
     states = Container.new()
     caller = {:callback, &Process.put(:result, &1)}
+    max = 100
+
     choke = {:test_choke, 10, 100, ChokeTimer}
-    states_ = 1..50 |> Enum.reduce(states, &SplitStates.init(&2, {Doer, &1}, [], caller, choke))
+    states_ = 1..max |> Enum.reduce(states, &SplitStates.init(&2, {Doer, &1}, [], caller, choke))
     assert 10 == Process.get(:result)
 
-    defmodule Util do
-      def loop(states, max) do
-        receive do
-          {:timeout, choke_timer} ->
-            ret = SplitStates.handle(states, choke_timer, [:go])
-            Process.get(:result) < max && ret |> loop(max)
-        after
-          1000 -> {:error, :timeout}
-        end
+    Wait.loop(states_, max)
+    assert max == Process.get(:result)
+
+    choke = {:test_choke, 1000, 1, ChokeTimer}
+    1..max |> Enum.reduce(states, &SplitStates.init(&2, {Doer, &1}, [], caller, choke))
+    assert 100 == Process.get(:result)
+  end
+
+  test "test deep throttle" do
+    defmodule Prep do
+      def init({_, x}) do
+        choke = {:test_choke, 10, 100, ChokeTimer}
+        [{:set, []}, {:call, {Doer, x}, [], :done, choke}]
+      end
+
+      def handle(_, :done, x) do
+        Process.put(:result, x)
+        :stop
       end
     end
 
-    Util.loop(states_, 50)
-    assert 50 == Process.get(:result)
+    max = 20
+    states = Container.new()
+    states_ = 1..max |> Enum.reduce(states, &SplitStates.init(&2, {Prep, &1}, []))
+    assert 10 == Process.get(:result)
+
+    # delay to test the case when queue may be completely flushed at once
+    Process.sleep(500)
+    Wait.loop(states_, max)
+    assert max == Process.get(:result)
   end
 end

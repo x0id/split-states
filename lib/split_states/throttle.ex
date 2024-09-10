@@ -11,7 +11,7 @@ defmodule SplitStates.Throttle do
   end
 
   # init state and process input
-  def start({_target, _event, _caller, {kind, rate, ms, _timer}, _tt}) do
+  def start({kind, rate, ms, _timer}) do
     count_io(:both, kind)
     window = ms |> System.convert_time_unit(:millisecond, :native)
     step = div(window, rate)
@@ -79,12 +79,12 @@ defmodule SplitStates.Throttle do
         pop_send(kind, next + step, step, stop, queue, [x | acc])
 
       {:empty, queue} ->
-        {next, queue, Enum.reverse(acc)}
+        {next, queue, acc}
     end
   end
 
   defp pop_send(_, next, _step, _stop, queue, acc) do
-    {next, queue, Enum.reverse(acc)}
+    {next, queue, acc}
   end
 
   defp count_io(dir, kind) do
