@@ -175,6 +175,28 @@ defmodule SplitStates do
   end
 
   defp apply_result(
+         {:cast, target, event},
+         _item,
+         items,
+         [{_origin, tts, _callers, _state} | _] = stack,
+         states
+       ) do
+    item = {:init, {target, event, nil, tts}, nil}
+    {[item | items], stack, states}
+  end
+
+  defp apply_result(
+         {:cast, target, event, choke},
+         _item,
+         items,
+         [{_origin, tts, _callers, _state} | _] = stack,
+         states
+       ) do
+    item = {:init, {target, event, nil, tts}, choke}
+    {[item | items], stack, states}
+  end
+
+  defp apply_result(
          {:call, target, event, tag},
          _item,
          items,
@@ -195,6 +217,11 @@ defmodule SplitStates do
        ) do
     caller = {:tagged, origin, tag}
     item = {:init, {target, event, caller, tts}, choke}
+    {[item | items], stack, states}
+  end
+
+  defp apply_result({:tell, target, event}, _item, items, stack, states) do
+    item = {:handle, {target, event}}
     {[item | items], stack, states}
   end
 

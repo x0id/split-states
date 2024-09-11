@@ -135,6 +135,50 @@ defmodule SplitStatesTest do
     assert ^states = SplitStates.init(states, {B, :one}, [{A, :two}, :second], caller3)
   end
 
+  test "test tell" do
+    defmodule A do
+      def init(_), do: {:set, nil}
+      def handle(_, :stop), do: :stop
+    end
+
+    defmodule B do
+      # note: reverse order!
+      def init(_), do: [{:tell, {A, nil}, [:stop]}, {:call, {A, nil}, [], :ret}]
+    end
+
+    states = Container.new()
+    assert ^states = SplitStates.init(states, {B, nil}, [], nil, nil, dbg_tt())
+  end
+
+  test "test cast" do
+    defmodule A do
+      def init({_, x}) do
+        Process.put(:result, x)
+        :idle
+      end
+    end
+
+    defmodule B do
+      def init({_, :one}, x), do: {:cast, {A, x}, []}
+
+      def init({_, :two}, x) do
+        choke = {:choke, 10, 100, ChokeTimer}
+        {:cast, {A, x}, [], choke}
+      end
+    end
+
+    states = Container.new()
+
+    assert ^states = SplitStates.init(states, {B, :one}, [:lalala], nil, nil, dbg_tt())
+    assert :lalala = Process.get(:result)
+
+    assert ^states =
+             SplitStates.init(states, {B, :two}, [:pepepe], nil, nil, dbg_tt())
+             |> Map.delete(:choke)
+
+    assert :pepepe = Process.get(:result)
+  end
+
   test "state update, multiple subscribers" do
     defmodule Server do
       def init(_), do: {:set, %{}}
