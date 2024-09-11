@@ -1,10 +1,10 @@
 defmodule SplitStates do
   require Logger
-  require SplitStates.Container
   alias SplitStates.Container, as: Container
+  alias SplitStates.Throttle, as: Throttle
 
-  def init(states, target, event, caller \\ nil, tt \\ nil) do
-    [{:init, {target, event, caller, tt}}] |> loop([], states)
+  def init(states, target, event, caller \\ nil, choke \\ nil, tt \\ nil) do
+    [{:init, {target, event, caller, tt}, choke}] |> loop([], states)
   end
 
   def handle(states, target, event) do
@@ -15,20 +15,29 @@ defmodule SplitStates do
 
   defp loop([], _, states), do: states
 
-  defp loop([{:init, {target, event, caller, tt} = input} = item | items], stack, states) do
+  defp loop([{:init, {target, event, caller, tt} = input, choke} = item | items], stack, states) do
     trace(tt, :init, input)
 
     case Container.exists?(states, target) do
       false ->
-        trace(tt, :new, {target, event})
+        case throttle(choke, input, states) do
+          {true, states} ->
+            trace(tt, :new, {target, event})
 
-        tts = Container.add_tt(tt)
-        callers = Container.add_caller(caller, tt)
-        stack = [{target, tts, callers, nil} | stack]
+            tts = Container.add_tt(tt)
+            callers = Container.add_caller(caller, tt)
+            stack = [{target, tts, callers, nil} | stack]
 
-        construct(target, event)
-        |> tap(&trace(tt, :result, &1))
-        |> apply_result(item, items, stack, states)
+            construct(target, event)
+            |> tap(&trace(tt, :result, &1))
+            |> apply_result(item, items, stack, states)
+
+          {false, states} ->
+            {items, stack, states}
+
+          {false, kind, timer, until, states} ->
+            {items, stack, states} |> set_throttle_timer(kind, timer, until)
+        end
 
       true ->
         trace(tt, :result, :subscribe)
@@ -50,6 +59,11 @@ defmodule SplitStates do
     |> loop()
   end
 
+  defp loop([{:flush_throttle, kind, timer} | items], stack, states) do
+    flush_throttle_queue(kind, timer, items, stack, states)
+    |> loop()
+  end
+
   defp loop([{:handle, {target, event} = input} = item | items], stack, states) do
     case Container.fetch(states, target) do
       {:ok, {tts, callers, state}} ->
@@ -66,7 +80,58 @@ defmodule SplitStates do
     end
   end
 
-  defp return({:callback, fun}, result, tt) when is_function(fun) do
+  # throttle input
+  defp throttle({kind, _, _, timer} = choke, input, states) do
+    case Container.fetch(states, kind) do
+      {:ok, {_, _, state}} ->
+        case Throttle.proc(state, input) do
+          {result, state} ->
+            {result, states |> Container.put(kind, state)}
+
+          {false, until, state} ->
+            {false, kind, timer, until, states |> Container.put(kind, state)}
+        end
+
+      :error ->
+        state = Throttle.start(choke)
+        {true, states |> Container.put(kind, state)}
+    end
+  end
+
+  defp throttle(nil, _, states), do: {true, states}
+
+  defp flush_throttle_queue(kind, timer, items, stack, states) do
+    case Container.fetch(states, kind) do
+      {:ok, {_, _, state}} ->
+        case Throttle.flush(state) do
+          {inputs, state} ->
+            states = states |> Container.put(kind, state)
+            items = inputs |> place_items(items)
+            {items, stack, states}
+
+          {until, inputs, state} ->
+            states = states |> Container.put(kind, state)
+            items = inputs |> place_items(items)
+            {items, stack, states} |> set_throttle_timer(kind, timer, until)
+        end
+
+      :error ->
+        {items, stack, states}
+    end
+  end
+
+  defp set_throttle_timer({items, stack, states}, kind, timer, abstime) do
+    target = {timer, abstime}
+    caller = {:throttle, kind, timer}
+    item = {:init, {target, [], caller, nil}, nil}
+    {[item | items], stack, states}
+  end
+
+  defp place_items(inputs, items) do
+    inputs |> Enum.reduce(items, &[{:init, &1, nil} | &2])
+  end
+
+  defp return({{:callback, fun}, tt}, result, acc) when is_function(fun) do
     trace(tt, :ret_func, result)
 
     try do
@@ -74,38 +139,32 @@ defmodule SplitStates do
     rescue
       error ->
         Logger.error("can't call callback: #{inspect(error)}")
-        :stop
     end
 
-    :idle
+    acc
   end
 
-  defp return({:tagged, origin, tag}, result, tt) do
+  defp return({{:tagged, origin, tag}, tt}, result, acc) do
     trace(tt, :tagged, [tag | result])
-    {:handle, {origin, [tag | result]}}
+    [{:handle, {origin, [tag | result]}} | acc]
   end
 
-  defp return(caller, _result, _tt) do
+  defp return({{:throttle, kind, timer}, tt}, _result, acc) do
+    trace(tt, :throttle, kind)
+    [{:flush_throttle, kind, timer} | acc]
+  end
+
+  defp return({caller, _tt}, _result, acc) do
     Logger.error("malformed caller: #{inspect(caller)}")
-    :idle
+    acc
+  end
+
+  defp add_return_items(result, items, callers) do
+    callers |> Enum.reduce(items, &return(&1, result, &2))
   end
 
   defp apply_return(result, items, [{_, _, callers, _} | _] = stack, states) do
-    items =
-      callers
-      |> Enum.reduce(items, fn {caller, tt}, acc ->
-        case return(caller, result, tt) do
-          :idle ->
-            # return processed
-            acc
-
-          {:handle, _} = item ->
-            # push back "call" item
-            [item | acc]
-        end
-      end)
-
-    {items, stack, states}
+    {add_return_items(result, items, callers), stack, states}
   end
 
   defp apply_result([], _item, items, stack, states), do: {items, stack, states}
@@ -123,7 +182,19 @@ defmodule SplitStates do
          states
        ) do
     caller = {:tagged, origin, tag}
-    item = {:init, {target, event, caller, tts}}
+    item = {:init, {target, event, caller, tts}, nil}
+    {[item | items], stack, states}
+  end
+
+  defp apply_result(
+         {:call, target, event, tag, choke},
+         _item,
+         items,
+         [{origin, tts, _callers, _state} | _] = stack,
+         states
+       ) do
+    caller = {:tagged, origin, tag}
+    item = {:init, {target, event, caller, tts}, choke}
     {[item | items], stack, states}
   end
 
@@ -140,7 +211,7 @@ defmodule SplitStates do
   # save state and subscription
   defp apply_result(
          {:set, state},
-         {:init, _},
+         {:init, _, _},
          items,
          [{target, tts, callers, _state} | stack],
          states
@@ -163,6 +234,11 @@ defmodule SplitStates do
   # remove state
   defp apply_result(:stop, _item, items, [{target, _tts, _callers, _state} | stack], states) do
     {items, stack, states |> Container.delete(target)}
+  end
+
+  # return result to caller(s) and remove state
+  defp apply_result({:stop, result}, _item, items, [{target, _, callers, _} | stack], states) do
+    {add_return_items([result], items, callers), stack, states |> Container.delete(target)}
   end
 
   # do nothing

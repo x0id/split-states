@@ -48,10 +48,12 @@ defmodule SplitStates.Container do
     result
   end
 
-  defp update_counter(op, {mod, _}) do
+  defp update_counter(op, {mod, _}), do: update_counter(op, mod)
+
+  defp update_counter(op, key) do
     with func when is_function(func, 2) <- :persistent_term.get(:spit_states_counter, nil) do
       try do
-        func.(op, mod)
+        func.(op, key)
       rescue
         _ -> nil
       end
