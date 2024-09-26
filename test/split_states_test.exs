@@ -46,6 +46,7 @@ defmodule SplitStatesTest do
     assert ^states = SplitStates.init(states, {Jo_, :one}, event, caller)
     assert ^states = SplitStates.init(states, {Job, :one}, event, caller)
     assert ^states = SplitStates.handle(states, {Job, :two}, event)
+    assert ^states = SplitStates.handle(states, {Job, :two}, event, true)
 
     states = SplitStates.init(states, {Job, :two}, [:real])
     states = SplitStates.init(states, {Job, :two}, [:real])

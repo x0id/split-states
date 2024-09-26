@@ -7,8 +7,8 @@ defmodule SplitStates do
     [{:init, {target, event, caller, tt}, choke}] |> loop([], states)
   end
 
-  def handle(states, target, event) do
-    [{:handle, {target, event}}] |> loop([], states)
+  def handle(states, target, event, verbose \\ false) do
+    [{:handle, {target, event}, verbose}] |> loop([], states)
   end
 
   defp loop({items, stack, states}), do: loop(items, stack, states)
@@ -47,7 +47,7 @@ defmodule SplitStates do
   end
 
   defp loop(
-         [{:handle, {target, event} = input} = item | items],
+         [{:handle, {target, event} = input, _} = item | items],
          [{target, tts, _callers, state} | _] = stack,
          states
        ) do
@@ -64,7 +64,7 @@ defmodule SplitStates do
     |> loop()
   end
 
-  defp loop([{:handle, {target, event} = input} = item | items], stack, states) do
+  defp loop([{:handle, {target, event} = input, verbose} = item | items], stack, states) do
     case Container.fetch(states, target) do
       {:ok, {tts, callers, state}} ->
         trace(tts, :handle, input)
@@ -75,7 +75,12 @@ defmodule SplitStates do
         |> loop()
 
       :error ->
-        Logger.error("target #{inspect(target)} not found")
+        if verbose do
+          Logger.error("target #{inspect(target)} not found")
+          Logger.debug("event: #{inspect(event)}")
+          Logger.debug("stack: #{inspect(stack)}")
+        end
+
         loop(items, stack, states)
     end
   end
@@ -139,6 +144,7 @@ defmodule SplitStates do
     rescue
       error ->
         Logger.error("can't call callback: #{inspect(error)}")
+        Logger.debug("result: #{inspect(result)}")
     end
 
     acc
@@ -146,7 +152,7 @@ defmodule SplitStates do
 
   defp return({{:tagged, origin, tag}, tt}, result, acc) do
     trace(tt, :tagged, [tag | result])
-    [{:handle, {origin, [tag | result]}} | acc]
+    [{:handle, {origin, [tag | result]}, nil} | acc]
   end
 
   defp return({{:throttle, kind, timer}, tt}, _result, acc) do
@@ -154,8 +160,9 @@ defmodule SplitStates do
     [{:flush_throttle, kind, timer} | acc]
   end
 
-  defp return({caller, _tt}, _result, acc) do
+  defp return({caller, _tt}, result, acc) do
     Logger.error("malformed caller: #{inspect(caller)}")
+    Logger.debug("result: #{inspect(result)}")
     acc
   end
 
@@ -221,7 +228,7 @@ defmodule SplitStates do
   end
 
   defp apply_result({:tell, target, event}, _item, items, stack, states) do
-    item = {:handle, {target, event}}
+    item = {:handle, {target, event}, nil}
     {[item | items], stack, states}
   end
 
@@ -250,7 +257,7 @@ defmodule SplitStates do
   # update state
   defp apply_result(
          {:set, state},
-         {:handle, _},
+         {:handle, _, _},
          items,
          [{target, tts, callers, _state} | stack],
          states
@@ -287,6 +294,8 @@ defmodule SplitStates do
     rescue
       error ->
         Logger.error("can't init state: #{inspect(error)}")
+        Logger.debug("target: #{inspect(target)}")
+        Logger.debug("args: #{inspect(args)}")
         :stop
     end
   end
@@ -303,6 +312,8 @@ defmodule SplitStates do
     rescue
       error ->
         Logger.error("can't update state: #{inspect(error)}")
+        Logger.debug("target: #{inspect(target)}")
+        Logger.debug("args: #{inspect(args)}")
         :idle
     end
   end
