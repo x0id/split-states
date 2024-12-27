@@ -3,11 +3,11 @@ defmodule SplitStates.Throttle do
   use TypedStruct
 
   typedstruct do
-    field(:kind, atom())
-    field(:window, pos_integer())
-    field(:step, pos_integer())
-    field(:next_ts, pos_integer())
-    field(:queue, :queue.queue(), default: :queue.new())
+    field :kind, atom()
+    field :window, pos_integer()
+    field :step, pos_integer()
+    field :next_ts, pos_integer()
+    field :queue, :queue.queue(), default: :queue.new()
   end
 
   # init state and process input
