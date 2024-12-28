@@ -18,8 +18,8 @@ defmodule SplitStates do
   defp loop([{:init, {target, event, caller, tt} = input, choke} = item | items], stack, states) do
     trace(tt, :init, input)
 
-    case Container.exists?(states, target) do
-      false ->
+    case Container.fetch(states, target) do
+      :error ->
         case throttle(choke, input, states) do
           {true, states} ->
             trace(tt, :new, {target, event})
@@ -39,9 +39,16 @@ defmodule SplitStates do
             {items, stack, states} |> set_throttle_timer(kind, timer, until)
         end
 
-      true ->
+      {:ok, {tts, callers, state}} ->
         trace(tt, :result, :subscribe)
-        {items, stack, states |> Container.subscribe(target, caller, tt)}
+        states = states |> Container.subscribe(target, caller, tt)
+        tts = Container.add_tt(tt, tts)
+        callers = Container.add_caller(caller, tt, callers)
+        stack = [{target, tts, callers, state} | stack]
+
+        serve(target, event, state)
+        |> tap(&trace(tts, :result, &1))
+        |> apply_result(item, items, stack, states)
     end
     |> loop()
   end
@@ -233,13 +240,13 @@ defmodule SplitStates do
   end
 
   # return void to caller(s)
-  defp apply_result(:return, _item, items, stack, states) do
-    apply_return([], items, stack, states)
+  defp apply_result(:return, item, items, stack, states) do
+    apply_return([], items, stack, states |> del_subs(item))
   end
 
   # return result to caller(s)
-  defp apply_result({:return, result}, _item, items, stack, states) do
-    apply_return([result], items, stack, states)
+  defp apply_result({:return, result}, item, items, stack, states) do
+    apply_return([result], items, stack, states |> del_subs(item))
   end
 
   # save state and subscription
@@ -287,13 +294,17 @@ defmodule SplitStates do
     {items, stack, states}
   end
 
+  defp del_subs(states, item) do
+    states |> Container.del_subs(item |> elem(1) |> elem(0))
+  end
+
   # create new state
   defp construct({mod, _key} = target, args) do
     try do
       apply(mod, :init, [target | args])
     rescue
       error ->
-        Logger.error("can't init state: #{inspect(error)}")
+        Logger.error("init error: #{inspect(error)}")
         Logger.debug("target: #{inspect(target)}")
         Logger.debug("args: #{inspect(args)}")
         :stop
@@ -305,13 +316,29 @@ defmodule SplitStates do
     :stop
   end
 
+  # process call with existing state
+  defp serve(target, args, state) do
+    try do
+      apply(elem(target, 0), :serve, [state | args])
+    rescue
+      UndefinedFunctionError ->
+        :idle
+
+      error ->
+        Logger.error("serve error: #{inspect(error)}")
+        Logger.debug("target: #{inspect(target)}")
+        Logger.debug("args: #{inspect(args)}")
+        :idle
+    end
+  end
+
   # process event in context of existing state
   defp process(target, args, state) do
     try do
       apply(elem(target, 0), :handle, [state | args])
     rescue
       error ->
-        Logger.error("can't update state: #{inspect(error)}")
+        Logger.error("handle error: #{inspect(error)}")
         Logger.debug("target: #{inspect(target)}")
         Logger.debug("args: #{inspect(args)}")
         :idle

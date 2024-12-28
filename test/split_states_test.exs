@@ -88,10 +88,11 @@ defmodule SplitStatesTest do
 
     # delayed return, result stored in the state
     value = [{:abc, 123}, %{a: :b}]
-    states_ = SplitStates.init(states, {Job, :one}, [:store, value], caller, nil, dbg_tt())
-    assert ^states_ = SplitStates.handle(states_, {Job, :one}, [:read])
+    states1 = SplitStates.init(states, {Job, :one}, [:store, value], caller, nil, dbg_tt())
+    states2 = %{{Job, :one} => {[], [], [value: value]}}
+    assert ^states2 = SplitStates.handle(states1, {Job, :one}, [:read])
     assert ^value = Process.get(:result)
-    assert ^states = SplitStates.handle(states_, {Job, :one}, [:pop])
+    assert ^states = SplitStates.handle(states1, {Job, :one}, [:pop])
     assert ^value = Process.get(:result)
   end
 
@@ -183,21 +184,18 @@ defmodule SplitStatesTest do
   test "state update, multiple subscribers" do
     defmodule Server do
       def init(_), do: {:set, %{}}
-      def handle(state, :upd, val), do: [{:return, :ok}, {:set, Map.put(state, :value, val)}]
-      def handle(state, :run), do: [{:return, state[:value]}, :stop]
+      def handle(state, :ret, val), do: [{:return, val}, :stop]
     end
 
     defmodule Client do
       def init(_, target), do: [{:set, []}, {:call, target, [], :ret}]
       def handle(_, :ret, :result), do: :stop
-      def handle(_, :ret, _), do: :idle
     end
 
     states = Container.new()
     # dbg = fn n -> {:callback, &Logger.debug("trc#{n} #{inspect(&1)}: #{inspect(&2)}")} end
     states_ = Enum.reduce(1..20, states, &SplitStates.init(&2, {Client, &1}, [{Server, :x}]))
-    states2 = SplitStates.handle(states_, {Server, :x}, [:upd, :result])
-    assert ^states = SplitStates.handle(states2, {Server, :x}, [:run])
+    assert ^states = SplitStates.handle(states_, {Server, :x}, [:ret, :result])
   end
 
   test "test simple timer implementation" do

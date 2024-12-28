@@ -30,6 +30,17 @@ defmodule SplitStates.Container do
     end)
   end
 
+  # remove all subscriptions of the given target
+  def del_subs(states, target) do
+    case Map.fetch(states, target) do
+      {:ok, {_, _, state}} ->
+        Map.put(states, target, {[], [], state})
+
+      _ ->
+        states
+    end
+  end
+
   # add/update state
   def put(states, target, state) do
     result =
