@@ -344,4 +344,34 @@ defmodule SplitStatesTest do
     Wait.loop(states_, max)
     assert max == Process.get(:result)
   end
+
+  test "serve callback" do
+    defmodule A do
+      def init(_), do: {:set, :wait_state}
+      def handle(_, :poke), do: [{:set, :ready_state}, {:return, :result}]
+      def serve(:wait_state), do: :idle
+      def serve(:ready_state), do: {:return, :result}
+    end
+
+    states = Container.new()
+    caller = {:callback, &Logger.info("ret: #{inspect(&1)}")}
+
+    # subscribe first caller
+    states1 = SplitStates.init(states, {A, :one}, [], caller)
+    assert %{{A, :one} => {[], [{caller, nil}], :wait_state}} = states1
+
+    # subscribe second caller
+    states2 = SplitStates.init(states1, {A, :one}, [], caller)
+    assert %{{A, :one} => {[], [{caller, nil}, {caller, nil}], :wait_state}} = states2
+
+    # return result, drop callers, but keep state
+    states3 = SplitStates.handle(states2, {A, :one}, [:poke])
+    assert %{{A, :one} => {[], [], :ready_state}} = states3
+
+    # instead of subscribing return result "cached" by :ready_state
+    caller = {:callback, &Process.put(:result, &1)}
+    states4 = SplitStates.init(states3, {A, :one}, [], caller)
+    assert %{{A, :one} => {[], [], :ready_state}} = states4
+    assert :result = Process.get(:result)
+  end
 end
