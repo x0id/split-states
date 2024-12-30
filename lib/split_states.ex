@@ -239,12 +239,22 @@ defmodule SplitStates do
     {[item | items], stack, states}
   end
 
-  # return void to caller(s)
+  # send void response to caller(s)
+  defp apply_result(:respond, _item, items, stack, states) do
+    apply_return([], items, stack, states)
+  end
+
+  # send result to caller(s)
+  defp apply_result({:respond, result}, _item, items, stack, states) do
+    apply_return([result], items, stack, states)
+  end
+
+  # return void to caller(s), unsubscribe caller(s)
   defp apply_result(:return, item, items, stack, states) do
     apply_return([], items, stack, states |> del_subs(item))
   end
 
-  # return result to caller(s)
+  # return result to caller(s), unsubscribe caller(s)
   defp apply_result({:return, result}, item, items, stack, states) do
     apply_return([result], items, stack, states |> del_subs(item))
   end

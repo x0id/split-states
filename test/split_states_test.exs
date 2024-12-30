@@ -35,6 +35,7 @@ defmodule SplitStatesTest do
 
     def init(_, :store, value), do: {:set, [value: value]}
     def handle([value: value], :read), do: {:return, value}
+    def handle(_, :ping), do: {:respond, :pong}
     def handle([value: value], :pop), do: [{:return, value}, :stop]
   end
 
@@ -76,8 +77,9 @@ defmodule SplitStatesTest do
     states = Container.new()
     caller = {:callback, &Logger.info("ret: #{inspect(&1)}")}
 
-    # direct return, no state added
+    # direct return/respond, no state added
     assert ^states = SplitStates.init(states, {Job, :one}, [:read], caller, nil, :trace_token)
+    assert ^states = SplitStates.init(states, {Job, :one}, [:ping], caller, nil, :trace_token)
     # malformed caller
     assert ^states = SplitStates.init(states, {Job, :one}, [:read], :caller, nil, :trace_token)
   end
@@ -90,6 +92,10 @@ defmodule SplitStatesTest do
     value = [{:abc, 123}, %{a: :b}]
     states1 = SplitStates.init(states, {Job, :one}, [:store, value], caller, nil, dbg_tt())
     states2 = %{{Job, :one} => {[], [], [value: value]}}
+    # on respond, don't unsibscribe callers
+    assert ^states1 = SplitStates.handle(states1, {Job, :one}, [:ping])
+    assert :pong = Process.get(:result)
+    # on return, unsibscribe callers
     assert ^states2 = SplitStates.handle(states1, {Job, :one}, [:read])
     assert ^value = Process.get(:result)
     assert ^states = SplitStates.handle(states1, {Job, :one}, [:pop])
