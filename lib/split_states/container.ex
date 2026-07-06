@@ -61,13 +61,5 @@ defmodule SplitStates.Container do
 
   defp update_counter(op, {mod, _}), do: update_counter(op, mod)
 
-  defp update_counter(op, key) do
-    with func when is_function(func, 2) <- :persistent_term.get(:spit_states_counter, nil) do
-      try do
-        func.(op, key)
-      rescue
-        _ -> nil
-      end
-    end
-  end
+  defp update_counter(op, key), do: SplitStates.Metrics.counter(op, key)
 end
