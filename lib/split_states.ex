@@ -183,6 +183,10 @@ defmodule SplitStates do
 
   defp apply_result([], _item, items, stack, states), do: {items, stack, states}
 
+  # NOTE: effects are applied in the listed order, but effects that enqueue
+  # work items (:call, :cast, :tell, returns) prepend to the work queue, so
+  # the enqueued operations execute in reverse of the listed order (LIFO).
+  # E.g. [{:tell, t, [:stop]}, {:call, t, [], :tag}] runs the :call first.
   defp apply_result([head | tail], item, items, stack, states) do
     {items, stack, states} = apply_result(head, item, items, stack, states)
     apply_result(tail, item, items, stack, states)
