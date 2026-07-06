@@ -87,25 +87,7 @@ defmodule SplitStates.Throttle do
     {next, queue, acc}
   end
 
-  defp count_io(dir, kind) do
-    with func when is_function(func, 2) <-
-           :persistent_term.get(:spit_states_throttle_io, nil) do
-      try do
-        func.(dir, kind)
-      rescue
-        _ -> nil
-      end
-    end
-  end
+  defp count_io(dir, kind), do: SplitStates.Metrics.throttle_io(dir, kind)
 
-  defp update_qlen(dir, kind) do
-    with func when is_function(func, 2) <-
-           :persistent_term.get(:spit_states_throttle_qlen, nil) do
-      try do
-        func.(dir, kind)
-      rescue
-        _ -> nil
-      end
-    end
-  end
+  defp update_qlen(dir, kind), do: SplitStates.Metrics.throttle_qlen(dir, kind)
 end

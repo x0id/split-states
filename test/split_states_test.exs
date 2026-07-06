@@ -6,23 +6,15 @@ defmodule SplitStatesTest do
   alias SplitStates.Container, as: Container
 
   setup_all do
-    :persistent_term.put(
-      :spit_states_counter,
-      # &Logger.debug("count(#{&1}, #{inspect(&2)})")
-      fn _, _ -> false = :persistent_term.erase(:spit_states_counter) end
-    )
+    alias SplitStates.Metrics
 
-    :persistent_term.put(
-      :spit_states_throttle_io,
-      # &Logger.debug("count(#{&1}, #{inspect(&2)})")
-      fn _, _ -> false = :persistent_term.erase(:spit_states_throttle_io) end
-    )
-
-    :persistent_term.put(
-      :spit_states_throttle_qlen,
-      # &Logger.debug("count(#{&1}, #{inspect(&2)})")
-      fn _, _ -> false = :persistent_term.erase(:spit_states_throttle_qlen) end
-    )
+    # &Logger.debug("count(#{&1}, #{inspect(&2)})")
+    # each hook removes itself on first call, raising a (rescued) MatchError
+    # on the way to exercise the hook error handling
+    Metrics.set_counter_hook(fn _, _ -> false = Metrics.clear_counter_hook() end)
+    Metrics.set_throttle_io_hook(fn _, _ -> false = Metrics.clear_throttle_io_hook() end)
+    Metrics.set_throttle_qlen_hook(fn _, _ -> false = Metrics.clear_throttle_qlen_hook() end)
+    :ok
   end
 
   defmodule Job do
@@ -222,7 +214,7 @@ defmodule SplitStatesTest do
       def handle({tref, tag, _val}, :stop) do
         Process.cancel_timer(tref)
 
-        # flash timer event if any
+        # flush timer event if any
         receive do
           {:timeout, ^tag, _} ->
             :ok
